@@ -1,108 +1,158 @@
 """ QtImageViewer.py: PyQt image viewer widget for a QPixmap in a QGraphicsView scene with mouse zooming and panning.
 """
 
-import sys
+import os
+import cv2
+import pickle
+import numpy as np
+
+from aithor_utils import get_list_scenes, get_ai2thor_controller
 
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt, QRectF, QT_VERSION_STR
-from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtWidgets import QGraphicsView, QGraphicsScene, QPushButton
+def aithor_handling(out_path='/scratch/antruong/workspace/test/', manual_check=False):
+    controller = get_ai2thor_controller()
+    scenes = get_list_scenes()
+
+    for _, s in enumerate(scenes):
+        write_frame(out_path, s, controller, manual_check)
 
 
-class QtImageViewer(QGraphicsView):
-    def __init__(self, ):
-        QGraphicsView.__init__(self)
+def write_frame(out_path, scene, controller, manual_check):
+    scene_dict = {'name': scene, 0: {}, 90: {}, 180: {}, 270: {}}
 
-        # Image is displayed as a QPixmap in a QGraphicsScene attached to this QGraphicsView.
-        self.scene = QGraphicsScene()
-        self.setScene(self.scene)
+    print('Name: ', scene)
+    controller.reset(scene=scene)
 
-        # Store a local handle to the scene's current image pixmap.
-        self._pixmap_handle = None
+    event = controller.step(dict(action='Initialize'), renderDepthImage=True, gridSize=0.25)
 
-        # Image aspect ratio mode.
-        # !!! ONLY applies to full image. Aspect ratio is always ignored when zooming.
-        #   Qt.IgnoreAspectRatio: Scale image to fit viewport.
-        #   Qt.KeepAspectRatio: Scale image to fit inside viewport, preserving aspect ratio.
-        #   Qt.KeepAspectRatioByExpanding: Scale image to fill the viewport, preserving aspect ratio.
-        self.aspectRatioMode = Qt.KeepAspectRatio
+    corners = np.array(event.metadata['sceneBounds']['cornerPoints'])
+    min_x, max_x = round(np.min(corners[:, 0])), round(np.max(corners[:, 0]))
+    min_z, max_z = round(np.min(corners[:, 2])), round(np.max(corners[:, 2]))
 
-        ok_button = QPushButton('OK', self)
-        ok_button.setToolTip('Accept this viewpoint')
-        ok_button.move(100, 100)
-        ok_button.clicked.connect(self.ok_clicked)
+    for ry in (0, 90, 180, 270):
+        for j in np.arange(0.75, 1.21, 0.25):
+            for k in np.arange(min_z, max_z + 0.1, 0.25):
+                for i in np.arange(min_x, max_x + 0.1, 0.25):
+                    if not in_good_range(i, ry, k, max_z, max_x, min_z, min_x):
+                        continue
 
-        ok_button = QPushButton('Not OK', self)
-        ok_button.setToolTip('Does not accept this viewpoint')
-        ok_button.move(200, 100)
-        ok_button.clicked.connect(self.not_ok_clicked)
+                    event = controller.step(action='TeleportFull', x=i, y=j, z=k, rotation=dict(x=0, y=ry, z=0),
+                                            horizon=0.0)
 
-    def ok_clicked(self):
-        pass
+                    x, y, z = get_location(event)
 
-    def not_ok_clicked(self):
-        pass
+                    if abs(i - x) + abs(j - y) + abs(k - k) > 0.05:
+                        continue
 
-    def has_image(self):
-        """ Returns whether or not the scene contains an image pixmap.
-        """
-        return self._pixmap_handle is not None
+                    print(i, j, k, x, y, z, ' --- ', ry, scene)
 
-    def clear_image(self):
-        """ Removes the current image pixmap from the scene if it exists.
-        """
-        if self.has_image():
-            self.scene.removeItem(self._pixmap_handle)
-            self._pixmap_handle = None
+                    image = event.frame
+                    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-    def pixmap(self):
-        """ Returns the scene's current image pixmap as a QPixmap, or else None if no image exists.
-        :rtype: QPixmap | None
-        """
-        if self.has_image():
-            return self._pixmap_handle.pixmap()
-        return None
+                    depth = event.depth_frame
 
-    def set_pixmap(self, image):
-        """ Set the scene's current image pixmap to the input QImage or QPixmap.
-        Raises a RuntimeError if the input image has type other than QImage or QPixmap.
-        :type image: QImage | QPixmap
-        """
-        if type(image) is QPixmap:
-            pixmap = image
-        elif type(image) is QImage:
-            pixmap = QPixmap.fromImage(image)
-        else:
-            raise RuntimeError("ImageViewer.setImage: Argument must be a QImage or QPixmap.")
+                    if manual_check:
+                        cv2.imshow('Image', image)
+                        if cv2.waitKey() == ord('n'):  # press n to reject the image
+                            continue
 
-        if self.has_image():
-            self._pixmap_handle.setPixmap(pixmap)
-        else:
-            self._pixmap_handle = self.scene.addPixmap(pixmap)
+                    extrinsic = compute_extrinsic(event, y)
 
-        self.setSceneRect(QRectF(pixmap.rect()))  # Set scene size to image size.
+                    if ry == 0 or ry == 180:
+                        if z not in scene_dict[ry].keys():
+                            scene_dict[ry][z] = dict()
+                            scene_dict[ry][z]['count'] = 0
 
-    def set_image(self, image):
-        height, width, channel = image.shape
-        bytes_per_line = channel * width
-        q_image = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888)
-        self.set_pixmap(q_image)
+                        if y not in scene_dict[ry][z].keys():
+                            scene_dict[ry][z][y] = dict()
+
+                        scene_dict[ry][z]['count'] += 1
+                        scene_dict[ry][z][y][x] = {'x': x, 'y': y, 'z': z, 'depth': depth, 'image': image,
+                                                   'extrinsic': extrinsic}
+                    else:
+                        if x not in scene_dict[ry].keys():
+                            scene_dict[ry][x] = dict()
+                            scene_dict[ry][x]['count'] = 0
+
+                        if y not in scene_dict[ry][x].keys():
+                            scene_dict[ry][x][y] = dict()
+
+                        scene_dict[ry][x]['count'] += 1
+                        scene_dict[ry][x][y][z] = {'x': x, 'y': y, 'z': z, 'depth': depth, 'image': image,
+                                                   'extrinsic': extrinsic}
+
+    save_to_file(scene_dict, out_path, scene)
 
 
-if __name__ == '__main__':
-    print('Using Qt ' + QT_VERSION_STR)
+def compute_extrinsic(event, y):
+    r1 = event.metadata['agent']['r1']
+    r2 = event.metadata['agent']['r2']
+    r3 = event.metadata['agent']['r3']
+    t = event.metadata['agent']['t']
 
-    # Create the application.
-    app = QApplication(sys.argv)
+    extrinsic = np.zeros((4, 4))
 
-    import cv2
-    cv_image = cv2.imread('/Users/anhtruong/Desktop/in.jpg')
+    extrinsic[0, 0] = r1['x']
+    extrinsic[0, 1] = r1['y']
+    extrinsic[0, 2] = r1['z']
+    extrinsic[1, 0] = r2['x']
+    extrinsic[1, 1] = r2['y']
+    extrinsic[1, 2] = r2['z']
+    extrinsic[2, 0] = r3['x']
+    extrinsic[2, 1] = r3['y']
+    extrinsic[2, 2] = r3['z']
+    extrinsic[0, 3] = t['x'] * 1000
+    extrinsic[1, 3] = y * 1000
+    extrinsic[2, 3] = t['z'] * 1000
+    extrinsic[3, 3] = 1
 
-    # Create image viewer and load an image file to display.
-    viewer = QtImageViewer()
-    viewer.set_image(cv_image)
+    return extrinsic
 
-    # Show viewer and run application.
-    viewer.show()
-    sys.exit(app.exec_())
+
+def get_location(event):
+    position = event.metadata['agent']['position']
+    x, y, z = position['x'], position['y'], position['z']
+
+    return x, y, z
+
+
+def in_good_range(idx, ry, k, max_z, max_x, min_z, min_x):
+    if ry == 0 and k + 1.5 > max_z:
+        return False
+
+    if ry == 90 and idx + 1.5 > max_x:
+        return False
+
+    if ry == 180 and k - 1.5 < min_z:
+        return False
+
+    if ry == 270 and idx - 1.5 < min_x:
+        return False
+
+    if (ry == 0 or ry == 180) and (idx > max_x - 1.5 or idx < min_x + 1.5):
+        return False
+
+    if (ry == 90 or ry == 270) and (k > max_z - 1.5 or idx < min_z + 1.5):
+        return False
+
+    return True
+
+
+def save_to_file(scene_dict, out_path, scene):
+    # TO REMOVE REDUNDANT CAMERA ALONG AXIS X
+    for ry in (0, 90, 180, 270):
+        to_remove = []
+        for i in scene_dict[ry].keys():
+            if scene_dict[ry][i]['count'] <= 1:
+                to_remove.append(i)
+
+        for k in to_remove:
+            scene_dict[ry].pop(k, None)
+
+    for ry in (0, 90, 180, 270):
+        for x in scene_dict[ry].keys():
+            pickle.dump({'rotation': ry, 'data': scene_dict[ry][x], 'name': scene},
+                        open(os.path.join(out_path, scene + '_' + str(ry) + '_' + str(x)), 'wb'))
+
+
+aithor_handling()
