@@ -55,6 +55,12 @@ def write_frame(out_path, scene, controller, manual_check):
                         cv2.imshow('Image', image)
                         if cv2.waitKey() == ord('n'):  # press n to reject the image
                             continue
+                    else:
+                        norm_depth = ((depth - depth.min()) / (depth.max() - depth.min()) * 255).astype(np.uint8)
+                        edge = (cv2.Canny(norm_depth, threshold1=0, threshold2=50) > 0).astype(float)
+
+                        if np.sum(edge) < 10:
+                            continue
 
                     extrinsic = compute_extrinsic(event, y)
 
@@ -155,4 +161,5 @@ def save_to_file(scene_dict, out_path, scene):
                         open(os.path.join(out_path, scene + '_' + str(ry) + '_' + str(x)), 'wb'))
 
 
-aithor_handling()
+output_folder = '/scratch/antruong/workspace/test/'
+aithor_handling(output_folder)
