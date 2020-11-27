@@ -4,6 +4,7 @@
 import os
 import cv2
 import pickle
+import random
 import numpy as np
 
 from aithor_utils import get_list_scenes, get_ai2thor_controller
@@ -30,7 +31,7 @@ def write_frame(out_path, scene, controller, manual_check):
     min_z, max_z = round(np.min(corners[:, 2])), round(np.max(corners[:, 2]))
 
     for ry in (0, 90, 180, 270):
-        for j in np.arange(0.75, 1.21, 0.25):
+        for j in np.arange(0.75, 1.25, 0.25):
             for k in np.arange(min_z, max_z + 0.1, 0.25):
                 for i in np.arange(min_x, max_x + 0.1, 0.25):
                     if not in_good_range(i, ry, k, max_z, max_x, min_z, min_x):
@@ -50,6 +51,9 @@ def write_frame(out_path, scene, controller, manual_check):
                     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
                     depth = event.depth_frame
+
+                    cv2.imshow('Image', image)
+                    cv2.waitKey(50)
 
                     if manual_check:
                         cv2.imshow('Image', image)
@@ -123,16 +127,16 @@ def get_location(event):
 
 
 def in_good_range(idx, ry, k, max_z, max_x, min_z, min_x):
-    if ry == 0 and k + 1.5 > max_z:
+    if ry == 0 and k + 2.75 > max_z:
         return False
 
-    if ry == 90 and idx + 1.5 > max_x:
+    if ry == 90 and idx + 2.75 > max_x:
         return False
 
-    if ry == 180 and k - 1.5 < min_z:
+    if ry == 180 and k - 2.75 < min_z:
         return False
 
-    if ry == 270 and idx - 1.5 < min_x:
+    if ry == 270 and idx - 2.75 < min_x:
         return False
 
     if (ry == 0 or ry == 180) and (idx > max_x - 1.5 or idx < min_x + 1.5):
@@ -149,7 +153,7 @@ def save_to_file(scene_dict, out_path, scene):
     for ry in (0, 90, 180, 270):
         to_remove = []
         for i in scene_dict[ry].keys():
-            if scene_dict[ry][i]['count'] <= 1:
+            if scene_dict[ry][i]['count'] <= 18:
                 to_remove.append(i)
 
         for k in to_remove:
@@ -157,8 +161,12 @@ def save_to_file(scene_dict, out_path, scene):
 
     for ry in (0, 90, 180, 270):
         for x in scene_dict[ry].keys():
-            pickle.dump({'rotation': ry, 'data': scene_dict[ry][x], 'name': scene},
-                        open(os.path.join(out_path, scene + '_' + str(ry) + '_' + str(x)), 'wb'))
+            if random.random() < 0.2:
+                pickle.dump({'rotation': ry, 'data': scene_dict[ry][x], 'name': scene},
+                            open(os.path.join(out_path, 'test', scene + '_' + str(ry) + '_' + str(x)), 'wb'))
+            else:
+                pickle.dump({'rotation': ry, 'data': scene_dict[ry][x], 'name': scene},
+                            open(os.path.join(out_path, 'train', scene + '_' + str(ry) + '_' + str(x)), 'wb'))
 
 
 output_folder = '/scratch/antruong/workspace/test/'
